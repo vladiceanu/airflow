@@ -100,10 +100,15 @@ class _SessionFactory(LoggingMixin):
             sts_response = self._assume_role_with_saml(
                 sts_client=sts_client, role_arn=role_arn, assume_role_kwargs=assume_role_kwargs
             )
+        elif assume_role_method == 'assume_role_with_web_identity':
+            sts_response = self._assume_role_with_web_identity(
+                sts_client=sts_client, role_arn=role_arn, assume_role_kwargs=assume_role_kwargs
+            )
         else:
             raise NotImplementedError(
                 f'assume_role_method={assume_role_method} in Connection {self.conn.conn_id} Extra.'
-                'Currently "assume_role" or "assume_role_with_saml" are supported.'
+                'Currently "assume_role", "assume_role_with_saml" or "assume_role_with_web_identity"
+                'are supported.'
                 '(Exclude this setting will default to "assume_role").'
             )
         # Use credentials retrieved from STS
@@ -190,6 +195,51 @@ class _SessionFactory(LoggingMixin):
         self.log.info("Doing sts_client.assume_role_with_saml to role_arn=%s", role_arn)
         return sts_client.assume_role_with_saml(
             RoleArn=role_arn, PrincipalArn=principal_arn, SAMLAssertion=saml_assertion, **assume_role_kwargs
+        )
+
+    def _assume_role_with_web_identity(
+        self, sts_client: boto3.client, role_arn: str, assume_role_kwargs: Dict[str, Any]
+    ) -> Dict:
+        import os
+
+        if "aws_web_identity_token" in self.extra_config:
+            aws_web_identity_token = self.extra_config.get(
+                "aws_web_identity_token")
+        elif "aws_web_identity_token_file" in self.extra_config:
+            token_file = self.extra_config.get("aws_web_identity_token_file")
+            if token_file.startswith("$"):
+                # example:
+                # "aws_web_identity_token_file": "$ENV_VARIABLE_POINTING_TO_A_FILE"
+                token_file = os.environ.get(token_file.split("$")[1])
+                aws_web_identity_token = open(
+                    token_file, 'r').read()
+            else:
+                # example:
+                # "aws_web_identity_token_file": "/path/to/token/file"
+                aws_web_identity_token = open(
+                    token_file, 'r').read()
+        else:
+            # If "aws_assume_role_with_web_identity" method is used
+            # and no "aws_web_identity_token" or "aws_web_identity_token_file"
+            # parameters specified in extraConfig, then fallback to the default
+            # value of env variable "AWS_WEB_IDENTITY_TOKEN_FILE"
+            aws_web_identity_token_file = os.environ.get(
+                "AWS_WEB_IDENTITY_TOKEN_FILE", "")
+            self.log.info(
+                "Using default aws_web_identity_token_file=%s", aws_web_identity_token_file)
+            aws_web_identity_token = open(
+                aws_web_identity_token_file, 'r').read()
+
+        if "duration_seconds" in self.extra_config:
+            assume_role_kwargs["DurationSeconds"] = self.extra_config.get(
+                "duration_seconds")
+            
+        assume_role_kwargs["WebIdentityToken"] = aws_web_identity_token
+        role_session_name = f"Airflow_{self.conn.conn_id}"
+
+        self.log.info("Doing sts_client.assume_role_with_web_identity to role_arn=%s", role_arn)
+        return sts_client.assume_role_with_web_identity(
+            RoleArn=role_arn, RoleSessionName=role_session_name, **assume_role_kwargs
         )
 
     def _fetch_saml_assertion_using_http_spegno_auth(self, saml_config: Dict[str, Any]) -> str:
